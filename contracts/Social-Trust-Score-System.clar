@@ -7,6 +7,8 @@
 (define-constant ERR_INSUFFICIENT_TRUST (err u105))
 (define-constant ERR_INVALID_WEIGHT (err u106))
 (define-constant ERR_COOLDOWN_ACTIVE (err u107))
+(define-constant ERR_MILESTONE_NOT_REACHED (err u108))
+(define-constant ERR_MILESTONE_ALREADY_CLAIMED (err u109))
 
 (define-constant MIN_TRUST_SCORE u50)
 (define-constant MAX_TRUST_SCORE u100)
@@ -338,6 +340,106 @@
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
     (var-set contract-paused false)
+    (ok true)
+  )
+)
+
+
+
+(define-map milestone-definitions
+  { milestone-id: uint }
+  {
+    required-score: uint,
+    reward-type: (string-ascii 20),
+    reward-value: uint,
+    badge-name: (string-ascii 30)
+  }
+)
+
+(define-map user-milestones
+  { user: principal, milestone-id: uint }
+  {
+    achieved: bool,
+    claimed: bool,
+    achieved-at: uint
+  }
+)
+
+(define-data-var next-milestone-id uint u1)
+
+(define-read-only (get-milestone (milestone-id uint))
+  (map-get? milestone-definitions { milestone-id: milestone-id })
+)
+
+(define-read-only (get-user-milestone (user principal) (milestone-id uint))
+  (map-get? user-milestones { user: user, milestone-id: milestone-id })
+)
+
+(define-read-only (get-milestone-rewards (user principal))
+  (match (map-get? user-profiles { user: user })
+    profile
+    (let
+      (
+        (trust-score (get trust-score profile))
+        (cooldown-reduction (if (>= trust-score u80) u50 u0))
+        (vote-bonus (if (>= trust-score u90) u20 u0))
+      )
+      (ok { cooldown-reduction: cooldown-reduction, vote-bonus: vote-bonus })
+    )
+    (ok { cooldown-reduction: u0, vote-bonus: u0 })
+  )
+)
+
+(define-public (create-milestone 
+  (required-score uint) 
+  (reward-type (string-ascii 20))
+  (reward-value uint)
+  (badge-name (string-ascii 30)))
+  (let
+    (
+      (milestone-id (var-get next-milestone-id))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (map-set milestone-definitions
+      { milestone-id: milestone-id }
+      {
+        required-score: required-score,
+        reward-type: reward-type,
+        reward-value: reward-value,
+        badge-name: badge-name
+      }
+    )
+    (var-set next-milestone-id (+ milestone-id u1))
+    (ok milestone-id)
+  )
+)
+
+(define-public (claim-milestone (milestone-id uint))
+  (let
+    (
+      (user tx-sender)
+      (user-profile (unwrap! (map-get? user-profiles { user: user }) ERR_USER_NOT_FOUND))
+      (milestone (unwrap! (get-milestone milestone-id) ERR_UNAUTHORIZED))
+      (user-milestone (map-get? user-milestones { user: user, milestone-id: milestone-id }))
+      (trust-score (get trust-score user-profile))
+      (required-score (get required-score milestone))
+    )
+    (asserts! (>= trust-score required-score) ERR_MILESTONE_NOT_REACHED)
+    
+    (match user-milestone
+      existing-milestone
+      (asserts! (not (get claimed existing-milestone)) ERR_MILESTONE_ALREADY_CLAIMED)
+      true
+    )
+    
+    (map-set user-milestones
+      { user: user, milestone-id: milestone-id }
+      {
+        achieved: true,
+        claimed: true,
+        achieved-at: stacks-block-height
+      }
+    )
     (ok true)
   )
 )
