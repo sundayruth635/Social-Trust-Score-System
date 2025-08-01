@@ -10,6 +10,13 @@
 (define-constant ERR_MILESTONE_NOT_REACHED (err u108))
 (define-constant ERR_MILESTONE_ALREADY_CLAIMED (err u109))
 
+(define-constant ERR_DELEGATION_EXISTS (err u110))
+(define-constant ERR_DELEGATION_NOT_FOUND (err u111))
+(define-constant ERR_DELEGATION_EXPIRED (err u112))
+(define-constant ERR_INSUFFICIENT_DELEGATION_TRUST (err u113))
+(define-constant MIN_DELEGATION_TRUST u80)
+(define-constant MAX_DELEGATION_DURATION u2016)
+
 (define-constant MIN_TRUST_SCORE u50)
 (define-constant MAX_TRUST_SCORE u100)
 (define-constant ENDORSEMENT_COOLDOWN u144)
@@ -440,6 +447,83 @@
         achieved-at: stacks-block-height
       }
     )
+    (ok true)
+  )
+)
+
+
+(define-map trust-delegations
+  { delegator: principal, delegate: principal }
+  {
+    delegation-power: uint,
+    expires-at: uint,
+    created-at: uint
+  }
+)
+
+(define-data-var total-delegations uint u0)
+
+(define-read-only (get-delegation (delegator principal) (delegate principal))
+  (map-get? trust-delegations { delegator: delegator, delegate: delegate })
+)
+
+(define-read-only (is-delegation-active (delegator principal) (delegate principal))
+  (match (get-delegation delegator delegate)
+    delegation
+    (ok (> (get expires-at delegation) stacks-block-height))
+    (ok false)
+  )
+)
+
+(define-read-only (get-effective-trust (user principal))
+  (match (map-get? user-profiles { user: user })
+    profile
+    (let
+      (
+        (base-trust (get trust-score profile))
+      )
+      (ok base-trust)
+    )
+    (ok u0)
+  )
+)
+
+(define-public (delegate-trust (delegate principal) (power uint) (duration uint))
+  (let
+    (
+      (delegator tx-sender)
+      (delegator-profile (unwrap! (map-get? user-profiles { user: delegator }) ERR_USER_NOT_FOUND))
+      (delegate-profile (unwrap! (map-get? user-profiles { user: delegate }) ERR_USER_NOT_FOUND))
+      (delegator-trust (get trust-score delegator-profile))
+      (expires-at (+ stacks-block-height duration))
+    )
+    (asserts! (not (is-eq delegator delegate)) ERR_SELF_ENDORSEMENT)
+    (asserts! (>= delegator-trust MIN_DELEGATION_TRUST) ERR_INSUFFICIENT_DELEGATION_TRUST)
+    (asserts! (and (>= power u1) (<= power u20)) ERR_INVALID_WEIGHT)
+    (asserts! (and (>= duration u144) (<= duration MAX_DELEGATION_DURATION)) ERR_INVALID_WEIGHT)
+    (asserts! (is-none (get-delegation delegator delegate)) ERR_DELEGATION_EXISTS)
+    
+    (map-set trust-delegations
+      { delegator: delegator, delegate: delegate }
+      {
+        delegation-power: power,
+        expires-at: expires-at,
+        created-at: stacks-block-height
+      }
+    )
+    (var-set total-delegations (+ (var-get total-delegations) u1))
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation (delegate principal))
+  (let
+    (
+      (delegator tx-sender)
+      (existing-delegation (unwrap! (get-delegation delegator delegate) ERR_DELEGATION_NOT_FOUND))
+    )
+    (map-delete trust-delegations { delegator: delegator, delegate: delegate })
+    (var-set total-delegations (- (var-get total-delegations) u1))
     (ok true)
   )
 )
