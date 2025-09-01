@@ -23,6 +23,10 @@
 (define-constant DECAY_RATE u1)
 (define-constant DECAY_INTERVAL u1008)
 
+(define-constant ERR_BADGE_NOT_FOUND (err u114))
+(define-constant ERR_BADGE_ALREADY_EARNED (err u115))
+(define-constant ERR_INSUFFICIENT_CATEGORY_ENDORSEMENTS (err u116))
+
 (define-map user-profiles
   { user: principal }
   {
@@ -524,6 +528,120 @@
     )
     (map-delete trust-delegations { delegator: delegator, delegate: delegate })
     (var-set total-delegations (- (var-get total-delegations) u1))
+    (ok true)
+  )
+)
+
+
+(define-map badge-templates
+  { badge-id: uint }
+  {
+    name: (string-ascii 30),
+    category: (string-ascii 20),
+    required-endorsements: uint,
+    min-trust-threshold: uint,
+    rarity-level: uint
+  }
+)
+
+(define-map user-badges
+  { user: principal, badge-id: uint }
+  {
+    earned: bool,
+    earned-at: uint,
+    endorsement-count-when-earned: uint
+  }
+)
+
+(define-map category-endorsements
+  { user: principal, category: (string-ascii 20) }
+  { count: uint, last-updated: uint }
+)
+
+(define-data-var next-badge-id uint u1)
+(define-data-var total-badges-issued uint u0)
+
+(define-read-only (get-badge-template (badge-id uint))
+  (map-get? badge-templates { badge-id: badge-id })
+)
+
+(define-read-only (get-user-badge (user principal) (badge-id uint))
+  (map-get? user-badges { user: user, badge-id: badge-id })
+)
+
+(define-read-only (get-category-endorsements (user principal) (category (string-ascii 20)))
+  (default-to { count: u0, last-updated: u0 }
+    (map-get? category-endorsements { user: user, category: category }))
+)
+
+(define-read-only (calculate-badge-bonus (user principal))
+  (match (map-get? user-profiles { user: user })
+    profile
+    (let
+      (
+        (trust-score (get trust-score profile))
+        (badge-count u0)
+      )
+      (ok (if (> badge-count u0) (/ badge-count u2) u0))
+    )
+    (ok u0)
+  )
+)
+
+(define-public (create-badge-template
+  (name (string-ascii 30))
+  (category (string-ascii 20))
+  (required-endorsements uint)
+  (min-trust-threshold uint)
+  (rarity-level uint))
+  (let
+    (
+      (badge-id (var-get next-badge-id))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (and (>= rarity-level u1) (<= rarity-level u5)) ERR_INVALID_WEIGHT)
+    (map-set badge-templates
+      { badge-id: badge-id }
+      {
+        name: name,
+        category: category,
+        required-endorsements: required-endorsements,
+        min-trust-threshold: min-trust-threshold,
+        rarity-level: rarity-level
+      }
+    )
+    (var-set next-badge-id (+ badge-id u1))
+    (ok badge-id)
+  )
+)
+
+(define-public (claim-badge (badge-id uint))
+  (let
+    (
+      (user tx-sender)
+      (user-profile (unwrap! (map-get? user-profiles { user: user }) ERR_USER_NOT_FOUND))
+      (badge-template (unwrap! (get-badge-template badge-id) ERR_BADGE_NOT_FOUND))
+      (existing-badge (map-get? user-badges { user: user, badge-id: badge-id }))
+      (trust-score (get trust-score user-profile))
+      (required-trust (get min-trust-threshold badge-template))
+      (category (get category badge-template))
+      (required-endorsements (get required-endorsements badge-template))
+      (user-category-endorsements (get-category-endorsements user category))
+      (category-count (get count user-category-endorsements))
+    )
+    (asserts! (>= trust-score required-trust) ERR_INSUFFICIENT_TRUST)
+    (asserts! (>= category-count required-endorsements) ERR_INSUFFICIENT_CATEGORY_ENDORSEMENTS)
+    (asserts! (is-none existing-badge) ERR_BADGE_ALREADY_EARNED)
+    
+    (map-set user-badges
+      { user: user, badge-id: badge-id }
+      {
+        earned: true,
+        earned-at: stacks-block-height,
+        endorsement-count-when-earned: category-count
+      }
+    )
+    (var-set total-badges-issued (+ (var-get total-badges-issued) u1))
     (ok true)
   )
 )
