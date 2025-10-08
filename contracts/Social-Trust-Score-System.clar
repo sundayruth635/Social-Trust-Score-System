@@ -27,6 +27,12 @@
 (define-constant ERR_BADGE_ALREADY_EARNED (err u115))
 (define-constant ERR_INSUFFICIENT_CATEGORY_ENDORSEMENTS (err u116))
 
+
+(define-constant ERR_SNAPSHOT_EXISTS (err u117))
+(define-constant ERR_SNAPSHOT_NOT_FOUND (err u118))
+(define-constant ERR_INVALID_TIMEFRAME (err u119))
+(define-constant SNAPSHOT_INTERVAL u1008)
+
 (define-map user-profiles
   { user: principal }
   {
@@ -643,5 +649,96 @@
     )
     (var-set total-badges-issued (+ (var-get total-badges-issued) u1))
     (ok true)
+  )
+)
+
+(define-map trust-score-history
+  { user: principal, snapshot-id: uint }
+  {
+    trust-score: uint,
+    endorsement-count: uint,
+    reputation-level: uint,
+    block-height: uint,
+    timestamp-marker: uint
+  }
+)
+
+(define-map user-snapshot-counter
+  { user: principal }
+  { count: uint, last-snapshot: uint }
+)
+
+(define-data-var total-snapshots uint u0)
+
+(define-read-only (get-snapshot (user principal) (snapshot-id uint))
+  (map-get? trust-score-history { user: user, snapshot-id: snapshot-id })
+)
+
+(define-read-only (get-snapshot-count (user principal))
+  (default-to { count: u0, last-snapshot: u0 }
+    (map-get? user-snapshot-counter { user: user }))
+)
+
+(define-read-only (calculate-trust-trend (user principal))
+  (let
+    (
+      (snapshot-data (get-snapshot-count user))
+      (snapshot-count (get count snapshot-data))
+      (current-profile (map-get? user-profiles { user: user }))
+    )
+    (if (< snapshot-count u2)
+      (ok { trend: "insufficient-data", change: u0 })
+      (match current-profile
+        profile
+        (let
+          (
+            (current-score (get trust-score profile))
+            (prev-snapshot (unwrap! (get-snapshot user (- snapshot-count u1)) 
+              (err ERR_SNAPSHOT_NOT_FOUND)))
+            (prev-score (get trust-score prev-snapshot))
+            (score-delta (if (> current-score prev-score)
+              (- current-score prev-score)
+              (- prev-score current-score)))
+          )
+          (ok { 
+            trend: (if (> current-score prev-score) "rising" "declining"),
+            change: score-delta
+          })
+        )
+        (err ERR_USER_NOT_FOUND)
+      )
+    )
+  )
+)
+
+(define-public (create-score-snapshot)
+  (let
+    (
+      (user tx-sender)
+      (user-profile (unwrap! (map-get? user-profiles { user: user }) ERR_USER_NOT_FOUND))
+      (snapshot-data (get-snapshot-count user))
+      (snapshot-count (get count snapshot-data))
+      (last-snapshot-block (get last-snapshot snapshot-data))
+      (new-snapshot-id (+ snapshot-count u1))
+    )
+    (asserts! (> stacks-block-height (+ last-snapshot-block SNAPSHOT_INTERVAL)) 
+      ERR_COOLDOWN_ACTIVE)
+    
+    (map-set trust-score-history
+      { user: user, snapshot-id: new-snapshot-id }
+      {
+        trust-score: (get trust-score user-profile),
+        endorsement-count: (get total-endorsements user-profile),
+        reputation-level: (get reputation-level user-profile),
+        block-height: stacks-block-height,
+        timestamp-marker: (/ stacks-block-height u1008)
+      }
+    )
+    (map-set user-snapshot-counter
+      { user: user }
+      { count: new-snapshot-id, last-snapshot: stacks-block-height }
+    )
+    (var-set total-snapshots (+ (var-get total-snapshots) u1))
+    (ok new-snapshot-id)
   )
 )
