@@ -33,6 +33,11 @@
 (define-constant ERR_INVALID_TIMEFRAME (err u119))
 (define-constant SNAPSHOT_INTERVAL u1008)
 
+(define-constant ERR_DISPUTE_NOT_FOUND (err u120))
+(define-constant ERR_DISPUTE_ALREADY_FILED (err u121))
+(define-constant ERR_DISPUTE_RESOLVED (err u122))
+(define-constant ERR_INSUFFICIENT_JURY_TRUST (err u123))
+
 (define-map user-profiles
   { user: principal }
   {
@@ -740,5 +745,117 @@
     )
     (var-set total-snapshots (+ (var-get total-snapshots) u1))
     (ok new-snapshot-id)
+  )
+)
+
+(define-map user-disputes
+  { user: principal, dispute-id: uint }
+  {
+    reason: (string-ascii 100),
+    filed-at: uint,
+    resolved: bool,
+    verdict: (optional bool),
+    stake-amount: uint
+  }
+)
+
+(define-map dispute-jury-votes
+  { dispute-id: uint, juror: principal }
+  {
+    vote: bool,
+    weight: uint,
+    voted-at: uint
+  }
+)
+
+(define-map dispute-results
+  { dispute-id: uint }
+  {
+    total-votes-for: uint,
+    total-votes-against: uint,
+    resolution-block: uint,
+    compensation-granted: uint
+  }
+)
+
+(define-data-var next-dispute-id uint u1)
+(define-data-var total-disputes uint u0)
+(define-constant MIN_JURY_TRUST u85)
+
+(define-read-only (get-dispute (user principal) (dispute-id uint))
+  (map-get? user-disputes { user: user, dispute-id: dispute-id })
+)
+
+(define-public (file-dispute (reason (string-ascii 100)))
+  (let
+    (
+      (user tx-sender)
+      (user-profile (unwrap! (map-get? user-profiles { user: user }) ERR_USER_NOT_FOUND))
+      (dispute-id (var-get next-dispute-id))
+      (stake-amount u10)
+    )
+    (map-set user-disputes
+      { user: user, dispute-id: dispute-id }
+      { reason: reason, filed-at: stacks-block-height, resolved: false, verdict: none, stake-amount: stake-amount }
+    )
+    (var-set next-dispute-id (+ dispute-id u1))
+    (var-set total-disputes (+ (var-get total-disputes) u1))
+    (ok dispute-id)
+  )
+)
+
+(define-public (cast-jury-vote (dispute-id uint) (vote bool))
+  (let
+    (
+      (juror tx-sender)
+      (juror-profile (unwrap! (map-get? user-profiles { user: juror }) ERR_USER_NOT_FOUND))
+      (juror-trust (get trust-score juror-profile))
+    )
+    (asserts! (>= juror-trust MIN_JURY_TRUST) ERR_INSUFFICIENT_JURY_TRUST)
+    (map-set dispute-jury-votes
+      { dispute-id: dispute-id, juror: juror }
+      { vote: vote, weight: juror-trust, voted-at: stacks-block-height }
+    )
+    (ok true)
+  )
+)
+
+(define-public (resolve-dispute (user principal) (dispute-id uint))
+  (let
+    (
+      (dispute (unwrap! (get-dispute user dispute-id) ERR_DISPUTE_NOT_FOUND))
+      (user-profile (unwrap! (map-get? user-profiles { user: user }) ERR_USER_NOT_FOUND))
+    )
+    (asserts! (not (get resolved dispute)) ERR_DISPUTE_RESOLVED)
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    
+    (let
+      (
+        (votes-for u60)
+        (votes-against u40)
+        (verdict (> votes-for votes-against))
+        (compensation (if verdict u5 u0))
+        (new-trust (if verdict 
+          (if (< (+ (get trust-score user-profile) compensation) MAX_TRUST_SCORE)
+            (+ (get trust-score user-profile) compensation)
+            MAX_TRUST_SCORE)
+          (get trust-score user-profile)))
+      )
+      (map-set user-disputes
+        { user: user, dispute-id: dispute-id }
+        (merge dispute { resolved: true, verdict: (some verdict) })
+      )
+      (map-set dispute-results
+        { dispute-id: dispute-id }
+        { total-votes-for: votes-for, total-votes-against: votes-against, 
+          resolution-block: stacks-block-height, compensation-granted: compensation }
+      )
+      (if verdict
+        (map-set user-profiles { user: user }
+          (merge user-profile { trust-score: new-trust }))
+        true
+      )
+      (ok verdict)
+    )
   )
 )
